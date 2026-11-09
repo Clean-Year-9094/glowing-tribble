@@ -1,0 +1,34 @@
+name: Kernel module build
+description: Request a cpuid_fault_emulation module for an exact kernel release.
+title: "[Kernel build] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!-- kernel-module-request:v1 -->
+        Paste the complete output of uname -r, not a screenshot.
+        OGC Fedora packages are fetched automatically. CachyOS/custom Arch
+        kernels require an exact headers package from a public GitHub Release
+        and its SHA-256. A matching package must contain Module.symvers and .config.
+        A successful build verifies vermagic, not runtime compatibility.
+        Invalid requests and build/publication failures receive an explanation
+        and are automatically closed. Correct the fields and reopen to retry.
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel release
+      description: Exact uname -r output; no commands, spaces, paths, or backticks.
+      placeholder: 7.2.9-ogc3.1.fc44.x86_64
+    validations:
+      required: true
+  - type: input
+    id: headers
+    attributes:
+      label: Headers package URL
+      description: Leave blank for OGC. For Arch, a public GitHub Release .pkg.tar.zst asset.
+      placeholder: https://github.com/OWNER/REPO/releases/download/TAG/linux-custom-headers-VERSION-x86_64.pkg.tar.zst
+  - type: input
+    id: checksum
+    attributes:
+      label: Headers SHA256
+      description: Required with a headers package URL; exactly 64 hexadecimal characters.

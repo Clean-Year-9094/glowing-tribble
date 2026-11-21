@@ -1,18 +1,18 @@
-name: build
+name: SteamOS kernel modules
 
 on:
   schedule:
     - cron: "0 6 * * *"
   push:
-    branches: [ master, main ]
+    branches: [master, main]
   pull_request:
-    branches: [ master, main ]
+    branches: [master, main]
   workflow_dispatch:
 
 env:
   MIRROR: https://steamdeck-packages.steamos.cloud/archlinux-mirror
-  MIN_KVER: "6.11"   # ignore kernel series older than this
-  KEEP: "20"         # newest N sub-builds to build per kernel series
+  MIN_KVER: "6.11"   # Ignore kernel series older than this.
+  KEEP: "20"         # Select up to this many headers packages per kernel series.
 
 jobs:
   discover:
@@ -22,8 +22,6 @@ jobs:
     outputs:
       build: ${{ steps.plan.outputs.build }}
       matrix: ${{ steps.plan.outputs.matrix }}
-      matching_tag: ${{ steps.plan.outputs.matching_tag }}
-      matching_release: ${{ steps.plan.outputs.matching_release }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -52,13 +50,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-
-      - name: Restore published modules
-        if: github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: bash .github/scripts/steamos-build.sh restore
-
       - name: Restore build cache
         uses: actions/cache@v6
         with:
@@ -66,10 +57,8 @@ jobs:
           key: modcache-${{ matrix.series }}-${{ hashFiles('.github/scripts/steamos-build.sh', 'Makefile', 'inc/**', 'src/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             modcache-${{ matrix.series }}-${{ hashFiles('.github/scripts/steamos-build.sh', 'Makefile', 'inc/**', 'src/**') }}-
-
       - name: Build missing modules
         run: bash .github/scripts/steamos-build.sh
-
       - name: Upload ${{ matrix.series }} modules
         uses: actions/upload-artifact@v7
         with:
@@ -78,7 +67,7 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    needs: [discover, build]
+    needs: build
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -87,73 +76,24 @@ jobs:
       group: steamos-module-release
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           pattern: modules-*
           path: out
           merge-multiple: true
-
-      - name: Assemble build inventory
-        shell: bash
-        run: |
-          shopt -s nullglob
-          inventories=(out/*.tsv)
-          if [ "${#inventories[@]}" -eq 0 ]; then
-            exit 0
-          fi
-          LC_ALL=C sort "${inventories[@]}" > steamos-build-inputs-v1.tsv
-          awk -F '\t' '{ print $3 "  out/" $2 }' steamos-build-inputs-v1.tsv | sha256sum --check
-
-      - name: Compare modules with the latest SteamOS release
+      - name: Stage new or changed modules
         id: changes
         env:
           GH_TOKEN: ${{ github.token }}
-          MATCHING_TAG: ${{ needs.discover.outputs.matching_tag }}
-          MATCHING_RELEASE: ${{ needs.discover.outputs.matching_release }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          modules=(out/*.ko)
-          if [ "${#modules[@]}" -eq 0 ]; then
-            echo "No modules to publish."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          for module in "${modules[@]}"; do
-            digest=$(sha256sum "$module")
-            printf '%s\tsha256:%s\n' "${module##*/}" "${digest%% *}"
-          done | LC_ALL=C sort > current-modules.tsv
-
-          previous_release=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-            jq -r '
-              flatten
-              | map(select(.draft == false and .prerelease == false and
-                  (.tag_name | test("^v[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}-[0-9a-f]{7}$"))))
-              | max_by(.published_at).id // empty
-            ')
-
-          if [ -n "$previous_release" ]; then
-            gh api --paginate "repos/$GITHUB_REPOSITORY/releases/$previous_release/assets?per_page=100" \
-              --jq '.[] | select(.name | endswith(".ko")) | [.name, .digest] | @tsv' |
-              LC_ALL=C sort > previous-modules.tsv
-            if cmp -s current-modules.tsv previous-modules.tsv; then
-              echo "Module filenames and SHA-256 digests match the latest SteamOS release."
-              if [ "$previous_release" = "$MATCHING_RELEASE" ]; then
-                gh release upload "$MATCHING_TAG" steamos-build-inputs-v1.tsv --repo "$GITHUB_REPOSITORY" --clobber
-              fi
-              echo "publish=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          fi
-          echo "publish=true" >> "$GITHUB_OUTPUT"
-
+        run: python3 .github/scripts/steamos-plan.py publish
       - id: release_info
         if: steps.changes.outputs.publish == 'true'
         run: |
-          echo "tag=v$(date +'%Y.%m.%d')-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
-          echo "date=$(date +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
-
+          echo "tag=v$(date -u +'%Y.%m.%d')-${GITHUB_SHA:0:7}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
       - name: Create Release
         if: steps.changes.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3
@@ -161,11 +101,13 @@ jobs:
           tag_name: ${{ steps.release_info.outputs.tag }}
           name: "SteamOS ${{ steps.release_info.outputs.tag }}"
           body: |
-            Automated build for SteamOS created on ${{ steps.release_info.outputs.date }}
+            Incremental SteamOS module build created on ${{ steps.release_info.outputs.date }}.
+            Modules for other kernels are available in earlier releases.
           target_commitish: ${{ github.sha }}
           files: |
-            out/*.ko
-            steamos-build-inputs-v1.tsv
+            publish/*.ko
+            publish/steamos-build-inputs-v1.tsv
+          fail_on_unmatched_files: true
           draft: false
           prerelease: false
         env:
